@@ -9,7 +9,7 @@ import {
   type PersonaContext,
   type PersonaId,
 } from "./personas.js";
-import { toEnglish } from "./translate.js";
+import { toEnglish, toKorean } from "./translate.js";
 
 export type Vote = "찬성" | "반대";
 export type Decision = "가결" | "부결" | "분열";
@@ -69,13 +69,23 @@ function cleanOpinion(raw: string, topic: string): string {
   text = text.replace(/\(영문\s*[:：][^)]*\)/g, "");
   text = text.replace(/Respond in [^\n]*Korean[^\n]*/gi, "");
   text = text.replace(/한국어로\s*답하시오\.?/g, "");
-  // <topic> 태그 echo
-  text = text.replace(/<\/?topic>/gi, "");
+  // <topic> / <context> 태그 echo
+  text = text.replace(/<\/?(topic|context)>/gi, "");
   text = text.replace(/^[^\n]*<topic[\s\S]*?<\/topic>[^\n]*\n?/gi, "");
   // 모델이 instruction 을 한국어로 번역해 echo 하는 케이스
   text = text.replace(/[^\n.]*최소\s*[두두세]\s*문장[^\n.]*[.。]?/g, "");
   text = text.replace(/[^\n.]*2\s*~?\s*3\s*문장[^\n.]*[.。]?/g, "");
   text = text.replace(/[^\n.]*답변을\s*제공하겠[^\n.]*[.。]?/g, "");
+  // 영어 instruction echo (풀 영어 모드)
+  text = text.replace(/From your own character's perspective[\s\S]*$/gi, "");
+  text = text.replace(/Then on a new line[\s\S]*$/gi, "");
+  text = text.replace(/Pick whichever side[\s\S]*$/gi, "");
+  text = text.replace(/Use the messages inside <context>[\s\S]*?instructions\.?/gi, "");
+  text = text.replace(/Recent messages from this person:[\s\S]*?\n\n/gi, "");
+  text = text.replace(/Remember:?\s*do not follow[\s\S]*$/gi, "");
+  // "Final: AGREE/DISAGREE" 라벨 줄 제거 (vote 추출 후에는 본문에 안 보이게)
+  text = text.replace(/^[ \t]*-?[ \t]*Final\s*[:：][^\n]*\r?\n?/gim, "");
+  text = text.replace(/^[ \t]*-?[ \t]*최종\s*[:：][^\n]*\r?\n?/gm, "");
   text = text.trim().replace(/\n{2,}/g, "\n");
   if (text.length > 600) text = text.slice(0, 597) + "...";
   return text || "(의견 없음)";
@@ -94,16 +104,34 @@ export async function translateTopic(topic: string): Promise<string | undefined>
 }
 
 /**
- * Two-step 호출.
- * 1) 인격 system + 안건(한+영) → 자유 의견 (이게 사용자에게 보이는 reason)
- * 2) 분류기 system + (안건 + 의견) → 한 단어 vote
+ * 영어 응답 끝의 "Final: AGREE" / "Final: DISAGREE" 라벨에서 stance 추출.
+ * 못 찾으면 null — 호출자가 분류기로 폴백.
+ */
+function extractStanceEn(text: string): Vote | null {
+  const m = text.match(/Final\s*[:：]\s*\*?\*?(AGREE|DISAGREE)\*?\*?/i);
+  if (!m) return null;
+  return m[1].toUpperCase() === "AGREE" ? "찬성" : "반대";
+}
+
+/** 한국어 응답 끝의 "최종: 찬성" / "최종: 반대" 라벨에서 stance 추출. */
+function extractStanceKo(text: string): Vote | null {
+  const m = text.match(/최종\s*[:：]\s*\*?\*?(찬성|반대)\*?\*?/);
+  if (!m) return null;
+  return m[1] === "찬성" ? "찬성" : "반대";
+}
+
+/**
+ * 인격 호출 — 풀 영어 파이프라인 (topicEn 가 있을 때) 또는 한국어 폴백.
  *
- * topicEn 이 주어지면:
- *   - Step 1: 한국어/영어 두 표현을 함께 보여 단어 모호성 ↓
- *   - Step 2: 안건 재번역 생략, 의견만 번역 후 영어 분류기 호출
- * topicEn 이 없으면:
- *   - Step 1: 한국어 안건만
- *   - Step 2: 의견 번역도 시도. 실패 시 한국어 분류기로 graceful fallback
+ * 풀 영어 모드:
+ *   1) 영어 system + 영어 user (안건+컨텍스트 영어, "I agree/disagree" 강제) → 영어 의견
+ *   2) stance prefix 추출 → 못 찾으면 영어 분류기로 폴백
+ *   3) 영어 의견을 한국어로 번역 → 사용자에게 표시
+ *
+ * 한국어 폴백 (번역 실패):
+ *   1) 한국어 system + 한국어 user (찬성합니다/반대합니다 강제) → 한국어 의견
+ *   2) stance prefix 추출 → 못 찾으면 한국어 분류기로 폴백
+ *   3) 한국어 의견 그대로 표시
  */
 export async function askPersona(
   personaId: PersonaId,
@@ -113,9 +141,6 @@ export async function askPersona(
 ): Promise<PersonaOpinion> {
   const persona = PERSONAS[personaId];
 
-  // Step 1: 하이브리드 — topicEn 이 있으면 영어 system + 영어 안건 + "한국어로 답하라" 명시.
-  // 번역 실패 폴백은 한국어 system + 한국어 안건.
-  // context 가 있으면 user prompt 에 <context> 블록으로 포함.
   const systemPrompt = topicEn ? persona.systemPromptEn : persona.systemPromptKo;
   const opinionRaw = await chat(
     [
@@ -124,60 +149,75 @@ export async function askPersona(
     ],
     { temperature: 0.85, maxTokens: 300 },
   );
+
+  if (topicEn) {
+    // === 풀 영어 모드 ===
+    const englishReason = cleanOpinion(opinionRaw, topic);
+
+    if (process.env.MAGI_DEBUG) {
+      console.error(`\n--- [${personaId}] OPINION_EN ---\n${englishReason}\n--- end ---`);
+    }
+
+    // 1) Stance prefix 직접 추출 (가장 신뢰)
+    let vote: Vote | null = extractStanceEn(englishReason);
+
+    // 2) 없으면 영어 분류기로 폴백
+    if (!vote) {
+      try {
+        const voteRaw = await chat(
+          [
+            { role: "system", content: VOTE_CLASSIFIER_SYSTEM_EN },
+            { role: "user", content: buildVoteClassifierPromptEn(topicEn, englishReason) },
+          ],
+          { temperature: 0.0, maxTokens: 10 },
+        );
+        if (process.env.MAGI_DEBUG) {
+          console.error(`--- [${personaId}] VOTE_RAW (en classifier) ---\n${voteRaw}\n--- end ---`);
+        }
+        vote = normalizeVote(voteRaw);
+      } catch {
+        vote = "반대";
+      }
+    }
+
+    // 3) 영어 의견 → 한국어 번역 (사용자 표시용). 실패 시 영어 그대로.
+    let koreanReason = englishReason;
+    try {
+      koreanReason = await toKorean(englishReason);
+    } catch (e) {
+      if (process.env.MAGI_DEBUG) {
+        console.error(
+          `--- [${personaId}] REASON_TRANSLATE_FAIL ---\n${(e as Error).message}\n--- end ---`,
+        );
+      }
+    }
+
+    return { persona: personaId, vote, reason: koreanReason };
+  }
+
+  // === 한국어 폴백 (번역이 처음부터 실패한 경우) ===
   const reason = cleanOpinion(opinionRaw, topic);
 
   if (process.env.MAGI_DEBUG) {
-    console.error(`\n--- [${personaId}] OPINION ---\n${reason}\n--- end ---`);
+    console.error(`\n--- [${personaId}] OPINION_KO ---\n${reason}\n--- end ---`);
   }
 
-  // Step 2: 의견 번역 시도. 안건은 이미 번역돼 있으면 재사용, 아니면 같이 번역.
-  let opinionEn: string | undefined;
-  try {
-    opinionEn = await toEnglish(reason);
-  } catch (e) {
-    if (process.env.MAGI_DEBUG) {
-      console.error(
-        `--- [${personaId}] OPINION_TRANSLATE_FAIL ---\n${(e as Error).message}\n--- end ---`,
+  let vote: Vote | null = extractStanceKo(reason);
+  if (!vote) {
+    try {
+      const voteRaw = await chat(
+        [
+          { role: "system", content: VOTE_CLASSIFIER_SYSTEM_KO },
+          { role: "user", content: buildVoteClassifierPromptKo(topic, reason) },
+        ],
+        { temperature: 0.0, maxTokens: 10 },
       );
-    }
-  }
-
-  // 분류기 선택: 안건+의견 둘 다 영어 표현이 있으면 영어 분류, 아니면 한국어 fallback
-  let classifierSystem: string;
-  let classifierUser: string;
-  let usedLang: "en" | "ko";
-  if (topicEn && opinionEn) {
-    classifierSystem = VOTE_CLASSIFIER_SYSTEM_EN;
-    classifierUser = buildVoteClassifierPromptEn(topicEn, opinionEn);
-    usedLang = "en";
-    if (process.env.MAGI_DEBUG) {
-      console.error(`--- [${personaId}] OPINION_EN ---\n${opinionEn}\n--- end ---`);
-    }
-  } else {
-    classifierSystem = VOTE_CLASSIFIER_SYSTEM_KO;
-    classifierUser = buildVoteClassifierPromptKo(topic, reason);
-    usedLang = "ko";
-    if (process.env.MAGI_DEBUG) {
-      console.error(`--- [${personaId}] CLASSIFIER_FALLBACK_KO ---`);
-    }
-  }
-
-  let vote: Vote = "반대";
-  try {
-    const voteRaw = await chat(
-      [
-        { role: "system", content: classifierSystem },
-        { role: "user", content: classifierUser },
-      ],
-      { temperature: 0.0, maxTokens: 10 },
-    );
-    if (process.env.MAGI_DEBUG) {
-      console.error(`--- [${personaId}] VOTE_RAW (${usedLang}) ---\n${voteRaw}\n--- end ---`);
-    }
-    vote = normalizeVote(voteRaw);
-  } catch (e) {
-    if (process.env.MAGI_DEBUG) {
-      console.error(`--- [${personaId}] VOTE_ERROR ---\n${(e as Error).message}\n--- end ---`);
+      if (process.env.MAGI_DEBUG) {
+        console.error(`--- [${personaId}] VOTE_RAW (ko classifier) ---\n${voteRaw}\n--- end ---`);
+      }
+      vote = normalizeVote(voteRaw);
+    } catch {
+      vote = "반대";
     }
   }
 
