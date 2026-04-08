@@ -1,5 +1,6 @@
 import { fetch } from "undici";
 import { config } from "./config.js";
+import { log } from "console";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -19,6 +20,10 @@ export interface ChatOptions {
  * 여기서는 표준 OpenAI 경로(`/v1/chat/completions`)를 우선 시도하고 실패 시 `/api/chat/completions` 로 폴백한다.
  */
 export async function chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<string> {
+  //log에 실제 채팅과 시스템 프롬프트를 보여줌
+  log("[LLM] messages:", messages);
+  log("[LLM] options:", opts);
+
   const body: Record<string, unknown> = {
     model: config.llm.model,
     messages,

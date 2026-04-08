@@ -136,84 +136,41 @@ function extractStanceKo(text: string): Vote | null {
 export async function askPersona(
   personaId: PersonaId,
   topic: string,
-  topicEn?: string,
   context?: PersonaContext,
 ): Promise<PersonaOpinion> {
   const persona = PERSONAS[personaId];
 
-  const systemPrompt = topicEn ? persona.systemPromptEn : persona.systemPromptKo;
+  const systemPrompt = persona.systemPromptEn;
   const opinionRaw = await chat(
     [
       { role: "system", content: systemPrompt },
-      { role: "user", content: buildPersonaUserPrompt(topic, topicEn, context) },
+      { role: "user", content: buildPersonaUserPrompt(topic, context) },
     ],
-    { temperature: 0.85, maxTokens: 300 },
+    { temperature: persona.temperature ? persona.temperature : 0.8, maxTokens: 300 },
   );
 
-  if (topicEn) {
-    // === 풀 영어 모드 ===
-    const englishReason = cleanOpinion(opinionRaw, topic);
-
-    if (process.env.MAGI_DEBUG) {
-      console.error(`\n--- [${personaId}] OPINION_EN ---\n${englishReason}\n--- end ---`);
-    }
-
-    // 1) Stance prefix 직접 추출 (가장 신뢰)
-    let vote: Vote | null = extractStanceEn(englishReason);
-
-    // 2) 없으면 영어 분류기로 폴백
-    if (!vote) {
-      try {
-        const voteRaw = await chat(
-          [
-            { role: "system", content: VOTE_CLASSIFIER_SYSTEM_EN },
-            { role: "user", content: buildVoteClassifierPromptEn(topicEn, englishReason) },
-          ],
-          { temperature: 0.0, maxTokens: 10 },
-        );
-        if (process.env.MAGI_DEBUG) {
-          console.error(`--- [${personaId}] VOTE_RAW (en classifier) ---\n${voteRaw}\n--- end ---`);
-        }
-        vote = normalizeVote(voteRaw);
-      } catch {
-        vote = "반대";
-      }
-    }
-
-    // 3) 영어 의견 → 한국어 번역 (사용자 표시용). 실패 시 영어 그대로.
-    let koreanReason = englishReason;
-    try {
-      koreanReason = await toKorean(englishReason);
-    } catch (e) {
-      if (process.env.MAGI_DEBUG) {
-        console.error(
-          `--- [${personaId}] REASON_TRANSLATE_FAIL ---\n${(e as Error).message}\n--- end ---`,
-        );
-      }
-    }
-
-    return { persona: personaId, vote, reason: koreanReason };
-  }
-
-  // === 한국어 폴백 (번역이 처음부터 실패한 경우) ===
-  const reason = cleanOpinion(opinionRaw, topic);
+  // === 풀 영어 모드 ===
+  const englishReason = cleanOpinion(opinionRaw, topic);
 
   if (process.env.MAGI_DEBUG) {
-    console.error(`\n--- [${personaId}] OPINION_KO ---\n${reason}\n--- end ---`);
+    console.error(`\n--- [${personaId}] OPINION_EN ---\n${englishReason}\n--- end ---`);
   }
 
-  let vote: Vote | null = extractStanceKo(reason);
+  // 1) Stance prefix 직접 추출 (가장 신뢰)
+  let vote: Vote | null = extractStanceEn(englishReason);
+
+  // 2) 없으면 영어 분류기로 폴백
   if (!vote) {
     try {
       const voteRaw = await chat(
         [
-          { role: "system", content: VOTE_CLASSIFIER_SYSTEM_KO },
-          { role: "user", content: buildVoteClassifierPromptKo(topic, reason) },
+          { role: "system", content: VOTE_CLASSIFIER_SYSTEM_EN },
+          { role: "user", content: buildVoteClassifierPromptEn(topic, englishReason) },
         ],
         { temperature: 0.0, maxTokens: 10 },
       );
       if (process.env.MAGI_DEBUG) {
-        console.error(`--- [${personaId}] VOTE_RAW (ko classifier) ---\n${voteRaw}\n--- end ---`);
+        console.error(`--- [${personaId}] VOTE_RAW (en classifier) ---\n${voteRaw}\n--- end ---`);
       }
       vote = normalizeVote(voteRaw);
     } catch {
@@ -221,7 +178,19 @@ export async function askPersona(
     }
   }
 
-  return { persona: personaId, vote, reason };
+  // 3) 영어 의견 → 한국어 번역 (사용자 표시용). 실패 시 영어 그대로.
+  let koreanReason = englishReason;
+  try {
+    koreanReason = await toKorean(englishReason);
+  } catch (e) {
+    if (process.env.MAGI_DEBUG) {
+      console.error(
+        `--- [${personaId}] REASON_TRANSLATE_FAIL ---\n${(e as Error).message}\n--- end ---`,
+      );
+    }
+  }
+
+  return { persona: personaId, vote, reason: koreanReason };
 }
 
 export function tally(opinions: PersonaOpinion[]): Verdict {

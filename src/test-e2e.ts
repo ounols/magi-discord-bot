@@ -27,7 +27,7 @@ function ms() {
   console.log(`[${ms()}] 인격 병렬 호출 시작...`);
   const t1 = Date.now();
   const opinions = await Promise.all(
-    tr.activePersonas.map((id) => askPersona(id, topic, topicEn)),
+    tr.activePersonas.map((id) => askPersona(id, topicEn ? topicEn : topic)),
   );
   console.log(`[${ms()}] 인격 호출 완료 (${Date.now() - t1}ms)\n`);
 

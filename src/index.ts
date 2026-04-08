@@ -133,8 +133,6 @@ const DECISION_COLOR: Record<string, number> = {
 
 interface MagiState {
   topic: string;
-  level: "light" | "deep";
-  rationale: string;
   active: PersonaId[];
   /** persona id → "thinking" | 결과 | undefined(아직 시작 전) */
   results: Map<PersonaId, "thinking" | PersonaOpinion>;
@@ -167,7 +165,6 @@ function magiEmbed(state: MagiState): EmbedBuilder {
     "```",
     `**안건**\n> ${state.topic}`,
     "",
-    `**분류**: \`${state.level === "deep" ? "DEEP / 심오" : "LIGHT / 일상"}\`${state.rationale ? `  — _${state.rationale}_` : ""}`,
     `**활성 인격**: ${state.active.map((p) => `\`${p}\``).join(", ")}`,
     state.context
       ? `**참고 컨텍스트**: \`@${state.context.username}\` 의 최근 메시지 ${state.context.messages.split("\n").length}개`
@@ -208,29 +205,16 @@ async function runMagi(
 ) {
   await interaction.deferReply();
 
-  // 1) 트리아지
-  let triageResult;
-  try {
-    triageResult = await triage(topic);
-  } catch (e) {
-    await interaction.editReply({
-      content: `⚠️ 트리아지 단계 실패: ${(e as Error).message}`,
-    });
-    return;
-  }
-
-  // 2) 단일 임베드 상태 — 이후 모든 단계는 이 한 임베드를 editReply 로 갱신.
+  // 1) 단일 임베드 상태 — 이후 모든 단계는 이 한 임베드를 editReply 로 갱신.
   const state: MagiState = {
     topic,
-    level: triageResult.level,
-    rationale: triageResult.rationale,
-    active: triageResult.activePersonas,
+    active: ["MELCHIOR", "BALTHASAR", "CASPER"],
     results: new Map(),
     context,
   };
   await interaction.editReply({ embeds: [magiEmbed(state)] });
 
-  // 3) 안건 영어 번역 (한 번만, 모든 인격 + 분류기에서 재사용)
+  // 2) 안건 영어 번역 (한 번만, 모든 인격 + 분류기에서 재사용)
   // context 가 있으면 messages 도 한 블록으로 같이 번역.
   const [topicEn, contextEn] = await Promise.all([
     translateTopic(topic),
@@ -242,12 +226,12 @@ async function runMagi(
 
   // 4) 인격 병렬 호출, UI 는 순차 갱신
   const pending = new Map<PersonaId, Promise<PersonaOpinion>>();
-  for (const id of triageResult.activePersonas) {
-    pending.set(id, askPersona(id, topic, topicEn, context));
+  for (const id of state.active) {
+    pending.set(id, askPersona(id, topicEn ? topicEn : topic, context));
   }
 
   const opinions: PersonaOpinion[] = [];
-  for (const id of triageResult.activePersonas) {
+  for (const id of state.active) {
     state.results.set(id, "thinking");
     await interaction.editReply({ embeds: [magiEmbed(state)] });
     await sleep(900);
