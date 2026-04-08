@@ -1,11 +1,7 @@
 import { chat } from "./llm.js";
 import {
   buildPersonaUserPrompt,
-  buildVoteClassifierPromptEn,
-  buildVoteClassifierPromptKo,
   PERSONAS,
-  VOTE_CLASSIFIER_SYSTEM_EN,
-  VOTE_CLASSIFIER_SYSTEM_KO,
   type PersonaContext,
   type PersonaId,
 } from "./personas.js";
@@ -63,14 +59,16 @@ function cleanOpinion(raw: string, topic: string): string {
   text = text.replace(/^안건\s*\([^)]*\)\s*[은는이가:：]?[^\n]*\r?\n?/, "");
   text = text.replace(/^안건\s*[:：][^\n]*\r?\n?/, "");
   // 영어 prompt 라벨 echo
-  text = text.replace(/^Topic\s*[:：][^\n]*\r?\n?/i, "");
+  text = text.replace(/^(Topic|Motion)\s*[:：][^\n]*\r?\n?/i, "");
+  text = text.replace(/^The following proposal has been submitted[\s\S]*?<\/proposal>\s*\n?/i, "");
   // user 프롬프트 echo (한 + 영)
   text = text.replace(/위\s*안건에\s*대해[\s\S]*?말하십시오\.?/g, "");
   text = text.replace(/\(영문\s*[:：][^)]*\)/g, "");
   text = text.replace(/Respond in [^\n]*Korean[^\n]*/gi, "");
   text = text.replace(/한국어로\s*답하시오\.?/g, "");
-  // <topic> / <context> 태그 echo
-  text = text.replace(/<\/?(topic|context)>/gi, "");
+  // <proposal> / <topic> / <context> 태그 echo
+  text = text.replace(/<\/?(proposal|topic|context)>/gi, "");
+  text = text.replace(/^[^\n]*<proposal[\s\S]*?<\/proposal>[^\n]*\n?/gi, "");
   text = text.replace(/^[^\n]*<topic[\s\S]*?<\/topic>[^\n]*\n?/gi, "");
   // 모델이 instruction 을 한국어로 번역해 echo 하는 케이스
   text = text.replace(/[^\n.]*최소\s*[두두세]\s*문장[^\n.]*[.。]?/g, "");
@@ -104,34 +102,10 @@ export async function translateTopic(topic: string): Promise<string | undefined>
 }
 
 /**
- * 영어 응답 끝의 "Final: AGREE" / "Final: DISAGREE" 라벨에서 stance 추출.
- * 못 찾으면 null — 호출자가 분류기로 폴백.
- */
-function extractStanceEn(text: string): Vote | null {
-  const m = text.match(/Final\s*[:：]\s*\*?\*?(AGREE|DISAGREE)\*?\*?/i);
-  if (!m) return null;
-  return m[1].toUpperCase() === "AGREE" ? "찬성" : "반대";
-}
-
-/** 한국어 응답 끝의 "최종: 찬성" / "최종: 반대" 라벨에서 stance 추출. */
-function extractStanceKo(text: string): Vote | null {
-  const m = text.match(/최종\s*[:：]\s*\*?\*?(찬성|반대)\*?\*?/);
-  if (!m) return null;
-  return m[1] === "찬성" ? "찬성" : "반대";
-}
-
-/**
- * 인격 호출 — 풀 영어 파이프라인 (topicEn 가 있을 때) 또는 한국어 폴백.
- *
- * 풀 영어 모드:
- *   1) 영어 system + 영어 user (안건+컨텍스트 영어, "I agree/disagree" 강제) → 영어 의견
- *   2) stance prefix 추출 → 못 찾으면 영어 분류기로 폴백
+ * 인격 호출 — 2턴 방식.
+ *   1) 자유 의견 생성 (구조 강제 없음)
+ *   2) 같은 세션에서 이어서 YES/NO 투표 결정
  *   3) 영어 의견을 한국어로 번역 → 사용자에게 표시
- *
- * 한국어 폴백 (번역 실패):
- *   1) 한국어 system + 한국어 user (찬성합니다/반대합니다 강제) → 한국어 의견
- *   2) stance prefix 추출 → 못 찾으면 한국어 분류기로 폴백
- *   3) 한국어 의견 그대로 표시
  */
 export async function askPersona(
   personaId: PersonaId,
@@ -139,46 +113,45 @@ export async function askPersona(
   context?: PersonaContext,
 ): Promise<PersonaOpinion> {
   const persona = PERSONAS[personaId];
-
   const systemPrompt = persona.systemPromptEn;
+  const userPrompt = buildPersonaUserPrompt(topic, context);
+
+  // 콜 1: 자유 의견 생성
   const opinionRaw = await chat(
     [
       { role: "system", content: systemPrompt },
-      { role: "user", content: buildPersonaUserPrompt(topic, context) },
+      { role: "user", content: userPrompt },
     ],
-    { temperature: persona.temperature ? persona.temperature : 0.8, maxTokens: 300 },
+    { temperature: persona.temperature ?? 0.8, maxTokens: 300 },
   );
 
-  // === 풀 영어 모드 ===
   const englishReason = cleanOpinion(opinionRaw, topic);
 
   if (process.env.MAGI_DEBUG) {
     console.error(`\n--- [${personaId}] OPINION_EN ---\n${englishReason}\n--- end ---`);
   }
 
-  // 1) Stance prefix 직접 추출 (가장 신뢰)
-  let vote: Vote | null = extractStanceEn(englishReason);
-
-  // 2) 없으면 영어 분류기로 폴백
-  if (!vote) {
-    try {
-      const voteRaw = await chat(
-        [
-          { role: "system", content: VOTE_CLASSIFIER_SYSTEM_EN },
-          { role: "user", content: buildVoteClassifierPromptEn(topic, englishReason) },
-        ],
-        { temperature: 0.0, maxTokens: 10 },
-      );
-      if (process.env.MAGI_DEBUG) {
-        console.error(`--- [${personaId}] VOTE_RAW (en classifier) ---\n${voteRaw}\n--- end ---`);
-      }
-      vote = normalizeVote(voteRaw);
-    } catch {
-      vote = "반대";
+  // 콜 2: 같은 세션에서 이어서 투표 (낮은 온도로 YES/NO만)
+  let vote: Vote;
+  try {
+    const voteRaw = await chat(
+      [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+        { role: "assistant", content: opinionRaw },
+        { role: "user", content: "Based on what you just said, do you vote to pass or reject this proposal? Answer with exactly one word: YES or NO." },
+      ],
+      { temperature: 0.1, maxTokens: 5 },
+    );
+    if (process.env.MAGI_DEBUG) {
+      console.error(`--- [${personaId}] VOTE_RAW ---\n${voteRaw}\n--- end ---`);
     }
+    vote = normalizeVote(voteRaw);
+  } catch {
+    vote = "반대";
   }
 
-  // 3) 영어 의견 → 한국어 번역 (사용자 표시용). 실패 시 영어 그대로.
+  // 영어 의견 → 한국어 번역 (사용자 표시용). 실패 시 영어 그대로.
   let koreanReason = englishReason;
   try {
     koreanReason = await toKorean(englishReason);

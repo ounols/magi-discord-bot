@@ -52,7 +52,10 @@ export async function chat(messages: ChatMessage[], opts: ChatOptions = {}): Pro
       const data = (await res.json()) as {
         choices?: { message?: { content?: string } }[];
       };
+
+      
       const content = data.choices?.[0]?.message?.content;
+      log(`[LLM] ${path} response:`, content);
       if (typeof content !== "string") {
         throw new Error(`LLM 응답에 content 없음: ${JSON.stringify(data).slice(0, 200)}`);
       }
