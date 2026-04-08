@@ -51,7 +51,8 @@ const DEEP_KEYWORDS = [
 ];
 
 export async function triage(topic: string): Promise<TriageResult> {
-  let level: "light" | "deep" = "light";
+  // 파싱 실패 시 기본값은 deep — 분류 못한 안건은 보수적으로 3인격 모두 깨운다.
+  let level: "light" | "deep" = "deep";
   let rationale = "";
 
   try {
@@ -67,7 +68,7 @@ export async function triage(topic: string): Promise<TriageResult> {
     level = lv.includes("deep") ? "deep" : "light";
     rationale = String(parsed.rationale || "").slice(0, 200);
   } catch {
-    rationale = "트리아지 파싱 실패 — 기본 light";
+    rationale = "트리아지 파싱 실패 — 기본 deep";
   }
 
   // 휴리스틱 백업: 350M 모델이 무거운 주제를 light 로 잘못 분류하는 경우를 잡는다.

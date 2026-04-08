@@ -73,7 +73,7 @@ function magiEmbed(state: MagiState): EmbedBuilder {
   ].join("\n");
 
   const embed = new EmbedBuilder()
-    .setTitle("⛧ MAGI SYSTEM")
+    .setTitle("𝕄𝔸𝔾𝕀 𝕊𝕐𝕊𝕋𝔼𝕄")
     .setDescription(desc)
     .setColor(color);
 

@@ -68,6 +68,9 @@ function cleanOpinion(raw: string, topic: string): string {
   text = text.replace(/\(영문\s*[:：][^)]*\)/g, "");
   text = text.replace(/Respond in [^\n]*Korean[^\n]*/gi, "");
   text = text.replace(/한국어로\s*답하시오\.?/g, "");
+  // <topic> 태그 echo
+  text = text.replace(/<\/?topic>/gi, "");
+  text = text.replace(/^[^\n]*<topic[\s\S]*?<\/topic>[^\n]*\n?/gi, "");
   // 모델이 instruction 을 한국어로 번역해 echo 하는 케이스
   text = text.replace(/[^\n.]*최소\s*[두두세]\s*문장[^\n.]*[.。]?/g, "");
   text = text.replace(/[^\n.]*2\s*~?\s*3\s*문장[^\n.]*[.。]?/g, "");
