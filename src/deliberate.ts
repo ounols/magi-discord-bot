@@ -6,6 +6,7 @@ import {
   PERSONAS,
   VOTE_CLASSIFIER_SYSTEM_EN,
   VOTE_CLASSIFIER_SYSTEM_KO,
+  type PersonaContext,
   type PersonaId,
 } from "./personas.js";
 import { toEnglish } from "./translate.js";
@@ -108,18 +109,20 @@ export async function askPersona(
   personaId: PersonaId,
   topic: string,
   topicEn?: string,
+  context?: PersonaContext,
 ): Promise<PersonaOpinion> {
   const persona = PERSONAS[personaId];
 
   // Step 1: 하이브리드 — topicEn 이 있으면 영어 system + 영어 안건 + "한국어로 답하라" 명시.
   // 번역 실패 폴백은 한국어 system + 한국어 안건.
+  // context 가 있으면 user prompt 에 <context> 블록으로 포함.
   const systemPrompt = topicEn ? persona.systemPromptEn : persona.systemPromptKo;
   const opinionRaw = await chat(
     [
       { role: "system", content: systemPrompt },
-      { role: "user", content: buildPersonaUserPrompt(topic, topicEn) },
+      { role: "user", content: buildPersonaUserPrompt(topic, topicEn, context) },
     ],
-    { temperature: 0.85, maxTokens: 250 },
+    { temperature: 0.85, maxTokens: 300 },
   );
   const reason = cleanOpinion(opinionRaw, topic);
 
