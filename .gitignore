@@ -1,0 +1,69 @@
+# ===== 비밀 / 환경변수 =====
+# 절대 커밋 금지. .env.example 만 placeholder 로 커밋.
+.env
+.env.*
+!.env.example
+
+# ===== 의존성 =====
+node_modules/
+jspm_packages/
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# ===== 빌드 산출물 =====
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# ===== 로그 =====
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+logs/
+
+# ===== 캐시 / 임시 =====
+.cache/
+.temp/
+.tmp/
+tmp/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+
+# ===== 테스트 / 커버리지 =====
+coverage/
+.nyc_output/
+
+# ===== IDE / 에디터 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# ===== OS =====
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ===== 프로젝트 로컬 디버그 산출물 =====
+# 일회성 페이로드 / 디버그 덤프 같은 거 만들면 여기 추가
+test-payload.json
+*.debug.json
