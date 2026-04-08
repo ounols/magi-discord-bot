@@ -163,9 +163,9 @@ function magiEmbed(state: MagiState): EmbedBuilder {
     "```",
     "NERV / 인공진화연구소 — MAGI 의사결정 시스템",
     "```",
-    `**안건**\n> ${state.topic}`,
+    `## 안건 : ${state.topic} ${state.context ? ` (feat. ${state.context.username})` : ""}`,
     "",
-    `**활성 인격**: ${state.active.map((p) => `\`${p}\``).join(", ")}`,
+    "",
     state.context
       ? `**참고 컨텍스트**: \`@${state.context.username}\` 의 최근 메시지 ${state.context.messages.split("\n").length}개`
       : "",
