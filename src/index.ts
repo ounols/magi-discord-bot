@@ -7,6 +7,7 @@ import {
   type ChatInputCommandInteraction,
   type MessageContextMenuCommandInteraction,
   type RepliableInteraction,
+  type TextBasedChannel,
 } from "discord.js";
 import { config } from "./config.js";
 import { askPersona, tally, translateTopic, type PersonaOpinion } from "./deliberate.js";
@@ -26,6 +27,15 @@ const client = new Client({
 /** 멘션된 사용자의 최근 메시지를 N개 가져와서 컨텍스트로 만든다. 실패/없으면 null. */
 const MENTION_RE = /<@!?(\d+)>/;
 const CONTEXT_LIMIT = 10;
+/** URL 패턴 — http(s) 링크를 [링크] placeholder 로 치환해서 토큰 노이즈 제거 */
+const URL_RE = /https?:\/\/\S+/gi;
+
+/** 메시지 한 줄을 정제 — URL 만 [링크] 로 치환. 빈 문자열만 거른다. */
+function sanitizeMessage(content: string): string | null {
+  const trimmed = content.trim();
+  if (!trimmed) return null;
+  return trimmed.replace(URL_RE, "[링크]").replace(/\s+/g, " ").trim();
+}
 
 async function fetchMentionContext(
   interaction: ChatInputCommandInteraction,
@@ -35,23 +45,43 @@ async function fetchMentionContext(
   if (!m) return null;
   const userId = m[1];
 
-  const channel = interaction.channel;
-  if (!channel || !("messages" in channel)) return null;
+  // 채널 객체 확보 — interaction.channel 이 null 이면 client.channels.fetch 로 가져온다
+  let channel: TextBasedChannel | null = null;
+  if (interaction.channel?.isTextBased()) {
+    channel = interaction.channel;
+  } else if (interaction.channelId) {
+    try {
+      const fetchedChannel = await interaction.client.channels.fetch(interaction.channelId);
+      if (fetchedChannel?.isTextBased()) {
+        channel = fetchedChannel;
+      } else {
+        return null;
+      }
+    } catch (e) {
+      console.error("[MAGI/context] channel fetch failed:", e);
+      return null;
+    }
+  }
+
+  if (!channel) return null;
 
   let fetched;
   try {
     fetched = await channel.messages.fetch({ limit: 100 });
   } catch (e) {
-    console.error("[MAGI] history fetch failed", e);
+    console.error("[MAGI/context] history fetch failed:", e);
     return null;
   }
 
-  // 최근(snowflake DESC) 순으로 그 사용자의 비어있지 않은 메시지만 추출
-  const userMsgs = fetched
-    .filter((msg) => msg.author.id === userId && msg.content.trim().length > 0)
-    .first(CONTEXT_LIMIT);
-
-  if (userMsgs.length === 0) return null;
+  // 그 사용자의 메시지만 (최신순), URL 은 [링크] 로 치환
+  const sanitized: string[] = [];
+  for (const msg of fetched.values()) {
+    if (msg.author.id !== userId) continue;
+    const cleaned = sanitizeMessage(msg.content);
+    if (cleaned) sanitized.push(cleaned);
+    if (sanitized.length >= CONTEXT_LIMIT) break;
+  }
+  if (sanitized.length === 0) return null;
 
   // 사용자 표시명
   let username = userId;
@@ -61,9 +91,9 @@ async function fetchMentionContext(
   } catch {}
 
   // 시간순(오래된 것 → 최신) 정렬해서 자연스러운 흐름으로
-  const lines = userMsgs
+  const lines = sanitized
     .reverse()
-    .map((msg, i) => `${i + 1}. ${msg.content.trim()}`)
+    .map((msg, i) => `${i + 1}. ${msg}`)
     .join("\n");
 
   return {
