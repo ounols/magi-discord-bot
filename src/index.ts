@@ -1,14 +1,19 @@
 import {
+  ActivityType,
   Client,
   EmbedBuilder,
   Events,
   GatewayIntentBits,
   MessageFlags,
+  Options,
+  PresenceUpdateStatus,
+  Sweepers,
   type ChatInputCommandInteraction,
   type MessageContextMenuCommandInteraction,
   type RepliableInteraction,
   type TextBasedChannel,
 } from "discord.js";
+import { Agent, getGlobalDispatcher, setGlobalDispatcher } from "undici";
 import { config } from "./config.js";
 import { askPersona, tally, translateTopic, type PersonaOpinion } from "./deliberate.js";
 import { PERSONAS, SUBJECT_LABEL_KO, type PersonaContext, type PersonaId } from "./personas.js";
@@ -22,6 +27,28 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
+  // 캐시 상한 — 기본값은 사실상 무제한이라 장시간 켜두면 메모리가 단조 증가한다.
+  makeCache: Options.cacheWithLimits({
+    ...Options.DefaultMakeCacheSettings,
+    MessageManager: 200,
+    PresenceManager: 0,
+    GuildMemberManager: {
+      maxSize: 200,
+      keepOverLimit: (m) => m.id === m.client.user.id,
+    },
+  }),
+  // 상시 청소 — idle 진입과 별개로 background sweeper 도 돌린다.
+  sweepers: {
+    ...Options.DefaultSweeperSettings,
+    messages: {
+      interval: 300, // 5분
+      lifetime: 600, // 10분 넘은 메시지 제거
+    },
+    users: {
+      interval: 3600,
+      filter: Sweepers.filterByLifetime({ lifetime: 3600 }),
+    },
+  },
 });
 
 /** 멘션된 사용자의 최근 메시지를 N개 가져와서 컨텍스트로 만든다. 실패/없으면 null. */
@@ -197,12 +224,46 @@ function magiEmbed(state: MagiState): EmbedBuilder {
   return embed;
 }
 
+// 동시 심의 방지 — LLM 백엔드는 한 번에 한 건만 처리한다고 가정.
+// 핸들러에서 진입 직후 isBusy() 로 거르고, runMagi 는 try/finally 로 플래그를 보장한다.
+// 워치독: runMagi 가 어떤 이유로든 (Discord API hang, 네트워크 stall 등) 끝나지 않을 경우
+// 플래그가 영원히 잠기는 것을 막는다. 정상 심의는 길어야 60초 안쪽이므로 120초면 충분.
+const MAGI_WATCHDOG_MS = 120_000;
+let magiBusy = false;
+let magiWatchdog: NodeJS.Timeout | null = null;
+function isBusy(): boolean {
+  return magiBusy;
+}
+function clearMagiWatchdog() {
+  if (magiWatchdog) {
+    clearTimeout(magiWatchdog);
+    magiWatchdog = null;
+  }
+}
+async function rejectBusy(interaction: RepliableInteraction) {
+  await interaction
+    .reply({
+      content: "⚠️ MAGI 가 이미 다른 안건을 심의 중입니다. 잠시 후 다시 시도해 주세요.",
+      flags: MessageFlags.Ephemeral,
+    })
+    .catch(() => {});
+}
+
 /** MAGI 핵심 파이프라인 — 슬래시 명령과 메시지 컨텍스트 명령이 공유. */
 async function runMagi(
   interaction: RepliableInteraction,
   topic: string,
   context?: PersonaContext,
 ) {
+  magiBusy = true;
+  clearMagiWatchdog();
+  magiWatchdog = setTimeout(() => {
+    console.error("[MAGI] watchdog fired — forcing busy flag release after stall");
+    magiBusy = false;
+    magiWatchdog = null;
+  }, MAGI_WATCHDOG_MS);
+  magiWatchdog.unref();
+  try {
   await interaction.deferReply();
 
   // 1) 단일 임베드 상태 — 이후 모든 단계는 이 한 임베드를 editReply 로 갱신.
@@ -256,10 +317,19 @@ async function runMagi(
   await sleep(600);
   state.verdict = tally(opinions);
   await interaction.editReply({ embeds: [magiEmbed(state)] });
+  } finally {
+    clearMagiWatchdog();
+    magiBusy = false;
+  }
 }
 
 /** 슬래시 명령 진입점 — /magi 주제: ... */
 async function handleMagiSlash(interaction: ChatInputCommandInteraction) {
+  if (isBusy()) {
+    await rejectBusy(interaction);
+    return;
+  }
+
   let topic = interaction.options.getString("주제", true);
 
   // 모든 <@id> 멘션을 익명 라벨로 치환 (멘션이 있든 없든)
@@ -277,6 +347,11 @@ async function handleMagiSlash(interaction: ChatInputCommandInteraction) {
 
 /** 메시지 컨텍스트 메뉴 진입점 — 메시지 우클릭 → Apps → MAGI 심의 */
 async function handleMagiMessage(interaction: MessageContextMenuCommandInteraction) {
+  if (isBusy()) {
+    await rejectBusy(interaction);
+    return;
+  }
+
   const msg = interaction.targetMessage;
   // 메시지 본문 추출. content 가 비어 있으면(첨부파일/임베드만 있는 메시지) 거부.
   const raw = (msg.content || "").trim();
@@ -292,11 +367,68 @@ async function handleMagiMessage(interaction: MessageContextMenuCommandInteracti
   await runMagi(interaction, topic);
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Idle state machine — 일정 시간 인터랙션이 없으면 캐시/소켓을 비워서 RSS 회수.
+// 다음 인터랙션이 들어오면 자동으로 active 로 복귀하고, undici 는 새 연결을 맺는다.
+// ────────────────────────────────────────────────────────────────────────────
+const IDLE_AFTER_MS = 10 * 60 * 1000; // 10분
+const IDLE_CHECK_MS = 60 * 1000;
+let lastActivityAt = Date.now();
+let isIdle = false;
+
+function markActive() {
+  lastActivityAt = Date.now();
+  if (!isIdle) return;
+  isIdle = false;
+  client.user?.setPresence({ status: PresenceUpdateStatus.Online });
+  console.log("[MAGI] active");
+}
+
+async function goIdle() {
+  if (isIdle) return;
+  isIdle = true;
+  console.log("[MAGI] entering idle");
+
+  client.user?.setPresence({
+    status: PresenceUpdateStatus.Idle,
+    activities: [{ name: "대기 중", type: ActivityType.Custom }],
+  });
+
+  // discord.js 캐시 강제 sweep — 남은 메시지/유저 캐시를 전부 비운다.
+  try {
+    client.sweepers.sweepMessages(() => true);
+    client.sweepers.sweepUsers(() => true);
+  } catch (e) {
+    console.error("[MAGI/idle] sweep failed:", e);
+  }
+
+  // undici 글로벌 dispatcher 교체 → 기존 keep-alive 소켓을 닫는다.
+  // llm.ts 의 chat() 은 다음 호출에서 새 dispatcher 로 자동 연결.
+  try {
+    const old = getGlobalDispatcher();
+    setGlobalDispatcher(new Agent({ keepAliveTimeout: 10_000, keepAliveMaxTimeout: 30_000 }));
+    await old.close().catch(() => {});
+  } catch (e) {
+    console.error("[MAGI/idle] dispatcher reset failed:", e);
+  }
+
+  // node --expose-gc 로 띄웠을 때만 동작 (없어도 OK).
+  const maybeGc = (globalThis as { gc?: () => void }).gc;
+  if (typeof maybeGc === "function") maybeGc();
+}
+
+setInterval(() => {
+  if (Date.now() - lastActivityAt >= IDLE_AFTER_MS) {
+    void goIdle();
+  }
+}, IDLE_CHECK_MS).unref();
+
 client.once(Events.ClientReady, (c) => {
   console.log(`[MAGI] online as ${c.user.tag}`);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  markActive();
   try {
     if (interaction.isChatInputCommand() && (interaction.commandName === "magi" || interaction.commandName === "마기" || interaction.commandName === "질문")) {
       await handleMagiSlash(interaction);
