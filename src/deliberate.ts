@@ -36,12 +36,23 @@ function normalizeVote(v: unknown): Vote {
     s.lastIndexOf("AGREE"),
     s.lastIndexOf("RECOMMEND"),
     s.lastIndexOf("찬"),
+    s.lastIndexOf("4"),
+    s.lastIndexOf("5"),
+    s.lastIndexOf("6"),
+    s.lastIndexOf("7"),
+    s.lastIndexOf("8"),
+    s.lastIndexOf("9"),
+    s.lastIndexOf("10"),
   );
   const noIdx = Math.max(
     s.lastIndexOf("NO"),
     s.lastIndexOf("DISAGREE"),
     s.lastIndexOf("AGAINST"),
     s.lastIndexOf("반"),
+    s.lastIndexOf("0"),
+    s.lastIndexOf("1"),
+    s.lastIndexOf("2"),
+    s.lastIndexOf("3"),
   );
   if (yesIdx === -1 && noIdx === -1) return "반대";
   if (yesIdx > noIdx) return "찬성";
@@ -139,7 +150,7 @@ export async function askPersona(
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
         { role: "assistant", content: opinionRaw },
-        { role: "user", content: "Based on what you just said, do you vote to pass or reject this proposal? Answer with exactly one word: YES or NO." },
+        { role: "user", content: "Based on this character's personality, guess the positivity scale of what they just said. Based on this character's personality, objective judgment, what score would you give out of 10? **Answer with ONLY A NUMBER**: [0-10]" },
       ],
       { temperature: 0.1, maxTokens: 5 },
     );
