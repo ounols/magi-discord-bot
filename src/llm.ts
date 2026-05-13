@@ -16,8 +16,8 @@ export interface ChatOptions {
 
 /**
  * OpenWebUI의 OpenAI 호환 엔드포인트로 chat completion 호출.
- * 일부 OpenWebUI 배포는 `/api/chat/completions`, 다른 배포는 `/v1/chat/completions` 사용.
- * 여기서는 표준 OpenAI 경로(`/v1/chat/completions`)를 우선 시도하고 실패 시 `/api/chat/completions` 로 폴백한다.
+ * OpenWebUI Ollama 경로(`/ollama/v1/chat/completions`)를 우선 시도하고
+ * 실패 시 `/api/chat/completions`, `/v1/chat/completions` 순으로 폴백한다.
  */
 export async function chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<string> {
 
@@ -32,7 +32,7 @@ export async function chat(messages: ChatMessage[], opts: ChatOptions = {}): Pro
     body.response_format = { type: "json_object" };
   }
 
-  const paths = ["/api/chat/completions", "/v1/chat/completions"];
+  const paths = ["/ollama/v1/chat/completions", "/api/chat/completions", "/v1/chat/completions"];
   let lastErr: unknown;
   for (const path of paths) {
     try {
